@@ -8,7 +8,8 @@ thisScriptPath=$(dirname "${thisScriptFile}")
 parentDirPath=$(dirname "${thisScriptPath}")
 
 # Set other paths.
-notifyScript="${parentDirPath}/notification/discord-webhook.sh"
+notifyScript="${NOTIFY_SCRIPT:-${parentDirPath}/notification/discord-webhook.sh}"
+zpoolCommand="${ZPOOL_COMMAND:-/sbin/zpool}"
 
 #### INITIALIZATION & PARAMETERS ####
 
@@ -24,9 +25,6 @@ poolNumber=0
 # Initalize JSON report string.
 poolDiscordJsonReport=""
 
-# Define keyword signifying unhealthy condtion.
-unhealthyConditions='(DEGRADED|FAULTED|OFFLINE|UNAVAIL|REMOVED|FAIL|DESTROYED|corrupt|cannot|unrecover)'
-
 # Define max capacity (%).
 maxCapacity=80
 
@@ -40,7 +38,7 @@ scrubExpirationDays=36
 while read line;
 do
   pools+=($line)
-done <<< "$(/sbin/zpool list | awk -F" " '{print $1}' | grep -v NAME)"
+done <<< "$("${zpoolCommand}" list -H -o name)"
 
 # Get total number of ZFS pools.
 totalPools="${#pools[@]}"
@@ -64,17 +62,18 @@ do
   # Set initial condition text.
   poolConditionSubText="No unhealthy states found from pool status."
 
-  # Search for any term signifying an uhealthy condition.
-  poolCondition=$(/sbin/zpool status ${pool} | egrep -i ${unhealthyConditions})
+  # Read the authoritative pool health value. Do not scan the full human-readable
+  # status text: healthy pools can contain historical phrases such as "Removal of
+  # vdev ... completed" and "removed device mappings".
+  poolOverallCondition=$("${zpoolCommand}" list -H -o health "${pool}")
 
-  # Set flag on any hits.
-  if [ "${poolCondition}" ]; then
+  # Any state other than ONLINE needs attention.
+  if [ "${poolOverallCondition}" != "ONLINE" ]; then
           poolIssues=1
           poolConditionSubText="There might be an issue with the pool health. Run "\`"zpool status ${pool}"\`" for details."
   fi
 
-  # Get the overall pool state and set notfication text.
-  poolOverallCondition=$(/sbin/zpool status ${pool} | grep state | awk '{print $2}')
+  # Set notification text.
   poolConditionText="${poolConditionSubText} Overall state is reporting as **${poolOverallCondition}** for this pool."
 
 
@@ -84,7 +83,7 @@ do
   poolCapacitySubText="The pool spare capacity is within limits."
 
   # Get current capacity used.
-  poolCapacity=$(/sbin/zpool list ${pool} -H -o capacity | cut -d'%' -f1)
+  poolCapacity=$("${zpoolCommand}" list "${pool}" -H -o capacity | cut -d'%' -f1)
   
   # Set flag if over max capacity.
   if [ $poolCapacity -ge $maxCapacity ]; then
@@ -105,8 +104,8 @@ do
   poolErrorStatus="No known data errors"
 
   # Search for error codes or text.
-  poolErrors=$(/sbin/zpool status ${pool} | grep ONLINE | grep -v state | awk '{print $3 $4 $5}' | grep -v 000)
-  poolErrorReport=$(/sbin/zpool status -v ${pool} | grep errors: | awk '{$1=""; print $0 }' | grep -v "${poolErrorStatus}")
+  poolErrors=$("${zpoolCommand}" status "${pool}" | grep ONLINE | grep -v state | awk '{print $3 $4 $5}' | grep -v 000)
+  poolErrorReport=$("${zpoolCommand}" status -v "${pool}" | grep errors: | awk '{$1=""; print $0 }' | grep -v "${poolErrorStatus}")
 
   # Set flag if any errors found.
   if [ "${poolErrors}" ] || [ "${poolErrorReport}" ]; then
@@ -125,11 +124,11 @@ do
   poolScrupSubText="The pool scrub date has not yet been exceeded."
 
   # Get any special conditions.
-  if [ $(/sbin/zpool status ${pool} | egrep -c "none requested") -ge 1 ]; then
+  if [ $("${zpoolCommand}" status "${pool}" | grep -Ec "none requested") -ge 1 ]; then
       poolScrupWarningText="No status to report. A "\`"zpool scrub ${pool}"\`" command must be run before this script can monitor the scrub expiration time."
 
   fi
-  if [ $(/sbin/zpool status ${pool} | egrep -c "scrub in progress|resilver") -ge 1 ]; then
+  if [ $("${zpoolCommand}" status "${pool}" | grep -Ec "scrub in progress|resilver") -ge 1 ]; then
       poolScrupWarningText="A pool scrub or resilver is currently in progress."
 
   fi
@@ -143,7 +142,7 @@ do
   else
 
     # Get the last scrub date.
-    poolScrubRawDate=$(/sbin/zpool status ${pool} | grep scrub | awk '{print $11" "$12" " $13" " $14" "$15}')
+    poolScrubRawDate=$("${zpoolCommand}" status "${pool}" | grep scrub | awk '{print $11" "$12" " $13" " $14" "$15}')
     poolScrubDate=$(date -d "$poolScrubRawDate" +%s)
 
     # Convert expiration to seconds.
